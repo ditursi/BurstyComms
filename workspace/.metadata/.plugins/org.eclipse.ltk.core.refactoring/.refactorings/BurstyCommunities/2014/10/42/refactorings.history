@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename local variable &apos;outsideStrength&apos; in &apos;InteractionGraph.greedyVertexGrab()&apos; to &apos;insideStrength&apos;&#x0D;&#x0A;- Original project: &apos;BurstyCommunities&apos;&#x0D;&#x0A;- Original element: &apos;InteractionGraph.greedyVertexGrab().outsideStrength&apos;&#x0D;&#x0A;- Renamed element: &apos;outsideStrength&apos;&#x0D;&#x0A;- Update references to refactored element" description="Rename local variable &apos;outsideStrength&apos;" id="org.eclipse.jdt.ui.rename.local.variable" input="/src&lt;{InteractionGraph.java[InteractionGraph~greedyVertexGrab@outsideStrength!4244!4312!4265!4279!D!0!false" name="insideStrength" references="true" stamp="1413294688340" version="1.0"/>
+</session>

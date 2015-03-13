@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring accessors="true" comment="Delete 6 elements from project &apos;BurstyCommunities&apos;&#x0D;&#x0A;- Original project: &apos;BurstyCommunities&apos;&#x0D;&#x0A;- Original elements:&#x0D;&#x0A;     jgraph-5.13.0.0.jar&#x0D;&#x0A;     jgrapht-core-0.9.0.jar&#x0D;&#x0A;     jgrapht-demo-0.9.0.jar&#x0D;&#x0A;     jgrapht-ext-0.9.0-uber.jar&#x0D;&#x0A;     jgrapht-ext-0.9.0.jar&#x0D;&#x0A;     jgraphx-2.0.0.1.jar" description="Delete elements" element1="src/jgrapht-ext-0.9.0.jar" element2="src/jgraphx-2.0.0.1.jar" element3="src/jgrapht-core-0.9.0.jar" element4="src/jgrapht-demo-0.9.0.jar" element5="src/jgrapht-ext-0.9.0-uber.jar" element6="src/jgraph-5.13.0.0.jar" elements="0" flags="589830" id="org.eclipse.jdt.ui.delete" resources="6" stamp="1412264206508" subPackages="false" version="1.0"/>
+</session>

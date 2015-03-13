@@ -1,0 +1,957 @@
+import org.jgrapht.*;
+import org.jgrapht.graph.*;
+import org.jgrapht.generate.*;
+
+import java.util.*;
+
+public class InteractionGraph {
+	public class EdgeCompare implements Comparator<DefaultWeightedEdge> {
+		public int compare(DefaultWeightedEdge e1, DefaultWeightedEdge e2) {
+			String s1 = underlying.getEdgeSource(e1);
+			String t1 = underlying.getEdgeTarget(e1);
+			String s2 = underlying.getEdgeSource(e2);
+			String t2 = underlying.getEdgeTarget(e2);
+			
+			String temp;
+			if (s1.compareTo(t1) > 0) {
+				temp = t1;
+				t1 = s1;
+				s1 = temp;
+			}
+			if (s2.compareTo(t2) > 0) {
+				temp = t2;
+				t2 = s2;
+				s2 = temp;
+			}
+			
+			if (s1.equals(s2)) {
+				if (t1.equals(t2)) {
+					return 0;
+				}
+				else if (t1.compareTo(t2) < 0) { return -1; }
+				else { return 1; }
+			}
+			else if (s1.compareTo(s2) < 0) { return -1; }
+			else { return 1; }
+		}
+	}
+
+
+	private static final int DEBUGOUTPUTLEVEL = 10;		// 10 shows cuts, volume
+	private static final double MINWEIGHT = 0.000000001;
+	private static final boolean NORMALIZE_INTERVALS = true;
+	
+	public int nextVertexNum = 0;
+	public double endTime = 100;
+	public double totalStrength = 0;
+	private double epsilon = 0.0000000000001;
+	public double maxWeight = 0;
+	public double maxStrength = 0;
+	private static double restartProb = 0.05;
+	private static double lazy = 0.0;
+	
+	public SimpleWeightedGraph<String, DefaultWeightedEdge> underlying;
+	public TreeMap<Double, DefaultWeightedEdge> interactions; // Primary storage of interactions
+	public TreeMap<DefaultWeightedEdge, NavigableSet<Double>> interactionsByEdge; // Reverse of previous map, for each of access; the list for each edge is maintained in sorted order
+	public EdgeCompare eComparator; // Necessary to use DefaultWeightedEdge as a key in a Map
+	public TreeMap<Double, String> clusterCoeffsbyWCC;
+	public TreeMap<String, Double> modifiedbyVertex;
+	public TreeMap<Double, List<String>> modifiedbyWCC;		// Needed to use a List value because of duplicate keys
+	public TreeMap<String, Double> egonetsbyVertex;
+	public TreeMap<Double, List<String>> egonetsbyCond;		// Needed to use a List value because of duplicate keys
+	public TreeMap<String, Double> clusterCoeffsbyVertex;
+	public TreeMap<String, Double> strengths;
+	public double[][] walkProb;  // CONVENTION: First coordinate is source vertex, second is destination vertex
+	
+	public InteractionGraph(double minGap)
+	{
+		underlying = new SimpleWeightedGraph<String, DefaultWeightedEdge>(DefaultWeightedEdge.class);
+		eComparator = new EdgeCompare();
+		interactions = new TreeMap<Double, DefaultWeightedEdge>();
+		interactionsByEdge = new TreeMap<DefaultWeightedEdge, NavigableSet<Double>>(eComparator);
+		epsilon = minGap;
+	}
+	
+	public void createUnderlying(int numV)
+	{
+		ScaleFreeGraphGenerator<String, DefaultWeightedEdge> gen = new ScaleFreeGraphGenerator<String, DefaultWeightedEdge>(numV);
+		myVF factory = new myVF();
+		HashMap<String,String> dummy = new HashMap<String,String>();
+		gen.generateGraph(underlying, factory, dummy);
+	}
+	
+	/* Set weight of all underlying edges to zero. */
+	public void clearCounts()
+	{
+		maxWeight = 0;
+		for (DefaultWeightedEdge curEdge : underlying.edgeSet()) {
+			underlying.setEdgeWeight(curEdge, 0.0);
+		}
+	}
+	
+	public void displayCounts()
+	{
+		System.out.println("Current edges & weights: ");
+		for (DefaultWeightedEdge curEdge : underlying.edgeSet()) {
+			System.out.println(curEdge.toString() + " " + underlying.getEdgeWeight(curEdge));
+		}
+	}
+	
+	// Note - this does not do what the title suggests...
+	public String highestWCCNeighbor(String targetVertex) {
+		List<String> neighbors = Graphs.neighborListOf(underlying, targetVertex);
+		String topNeighbor = neighbors.get(0);
+		Double topWCC = strengths.get(topNeighbor);
+		String curNeighbor;
+		Double curWCC;
+		int i;
+		for (i = 1; i < neighbors.size(); i++) {
+			curNeighbor = neighbors.get(i);
+			curWCC = strengths.get(curNeighbor);
+			if (topWCC.compareTo(curWCC) < 0) {
+				topNeighbor = curNeighbor;
+				topWCC = curWCC;
+			}
+		}
+		return topNeighbor;
+	}
+
+	/* Assuming the "weights" are L2-norms of deviations from evenly-spaced interactions, calculated in
+	 * the interactionIntervalNorms method. Also calculates strengths, because I still haven't pulled this
+	 * out into its own method. */
+	public void calcEgonetConductances()
+	{
+		egonetsbyVertex = new TreeMap<String,Double>();
+		egonetsbyCond = new TreeMap<Double, List<String>>();
+		strengths = new TreeMap<String,Double>();
+		double conductance = 1.0;
+		
+		totalStrength = 0;
+		double totalVolume = 0;
+		for (DefaultWeightedEdge e : underlying.edgeSet()) {
+			totalVolume += 2 * underlying.getEdgeWeight(e);
+		}
+		for (String curVertex : underlying.vertexSet()) {
+			double internalVolume = 0, cutEdges = 0, strength = 0;
+			List<String> neighbors = Graphs.neighborListOf(underlying, curVertex);
+
+			// All nodes have at least one neighbor - we guaranteed the graph was connected at the outset.
+			for (String curNeighbor : neighbors) {
+				for (DefaultWeightedEdge curEdge : underlying.edgesOf(curNeighbor)) {
+					String otherVertex = Graphs.getOppositeVertex(underlying, curEdge, curNeighbor);
+					double weight = underlying.getEdgeWeight(curEdge);
+					
+					internalVolume += weight; 	// Obviously, this edge is connected to the egonet.
+					
+					if (otherVertex.equals(curVertex)) { 	// "spoke" of egonet
+						strength += weight;
+						internalVolume += weight;	// Covers the fact that we'll never examine the "hub" node in this loop.
+					}
+					else if (!neighbors.contains(otherVertex)) {		// Edge leads out of egonet
+						cutEdges += weight;
+					}
+				}
+			}
+			
+			conductance = cutEdges / Math.min(internalVolume, (totalVolume - internalVolume));
+			
+			egonetsbyVertex.put(curVertex, new Double(conductance));
+			// System.out.print(curVertex + " " + conductance + "\t");
+			if (egonetsbyCond.containsKey(conductance)) {
+				egonetsbyCond.get(conductance).add(curVertex);
+			}
+			else {
+				ArrayList<String> newList = new ArrayList<String>();
+				newList.add(curVertex);
+				egonetsbyCond.put(new Double(conductance), newList);
+			}
+			
+			strengths.put(curVertex, new Double(strength));
+			if (strength > maxStrength) { maxStrength = strength; }
+			totalStrength += strength;
+		}
+		System.out.println("");
+	}
+	
+	
+	/* Use the "weights" in the backing graph to calculate weighted local CCs a la Onnela et al. */ 
+	public void calcWCCs()
+	{
+		clusterCoeffsbyWCC = new TreeMap<Double,String>();
+		clusterCoeffsbyVertex = new TreeMap<String,Double>();
+		strengths = new TreeMap<String,Double>();
+		double strength, result, sum, product;
+		DefaultWeightedEdge curEdge;
+		
+		totalStrength = 0;
+		for (String curVertex : underlying.vertexSet()) {
+			List<String> neighbors = Graphs.neighborListOf(underlying, curVertex);
+			if (neighbors.size() > 1) {
+				sum = strength = 0;
+				for (int i = 0; i < neighbors.size(); i++) {
+					curEdge = underlying.getEdge(curVertex, neighbors.get(i));
+					strength = strength + underlying.getEdgeWeight(curEdge);
+					for (int j = i+1; j < neighbors.size(); j++) {
+						if (underlying.containsEdge(neighbors.get(i), neighbors.get(j))) {
+							product = underlying.getEdgeWeight(curEdge) * 
+										underlying.getEdgeWeight(underlying.getEdge(neighbors.get(i),curVertex)) *
+										underlying.getEdgeWeight(underlying.getEdge(neighbors.get(j),curVertex));
+							sum += Math.pow(product, (1.0/3.0));
+
+//							if (Double.isNaN(product))
+//							{
+//								System.out.println(underlying.getEdgeWeight(curEdge) + 
+//										underlying.getEdgeWeight(underlying.getEdge(neighbors.get(i),curVertex)) +
+//										underlying.getEdgeWeight(underlying.getEdge(neighbors.get(j),curVertex)));
+//							}
+
+						}
+					}
+				}
+				strengths.put(curVertex, new Double(strength));
+				if (strength > maxStrength) { maxStrength = strength; }
+				totalStrength += strength;
+				result = (2 * sum) / (neighbors.size() * (neighbors.size() - 1) * maxWeight);
+
+//				if (Double.isNaN(result)) {
+//					System.out.println("sum: " + sum + "; size: " + neighbors.size() + "; maxWeight: " + maxWeight);
+//				}
+
+			}
+			else {
+				strength = underlying.getEdgeWeight(underlying.getEdge(curVertex, neighbors.get(0)));
+				strengths.put(curVertex, new Double(strength));
+				if (strength > maxStrength) { maxStrength = strength; }
+				totalStrength += strength;
+				result = 0; // define leaf nodes to have a WCC of 0
+			}
+			clusterCoeffsbyWCC.put(new Double(result), curVertex);
+			clusterCoeffsbyVertex.put(curVertex, new Double(result));
+//			System.out.println("Vertex " + curVertex + ": " + result);
+		}
+		
+		double maxWCC = clusterCoeffsbyWCC.lastKey();
+		while (Double.isNaN(maxWCC) || Double.isInfinite(maxWCC)) {
+			maxWCC = clusterCoeffsbyWCC.lowerKey(maxWCC);
+		}
+		modifiedbyWCC = new TreeMap<Double,List<String>>();
+		modifiedbyVertex = new TreeMap<String,Double>();
+		for (String curVertex : underlying.vertexSet()) {
+			double modCC = (0.5 * clusterCoeffsbyVertex.get(curVertex) / maxWCC) + (0.5 * strengths.get(curVertex) / maxStrength);
+			modifiedbyVertex.put(curVertex, modCC);
+			if (modifiedbyWCC.containsKey(modCC)) { 
+				modifiedbyWCC.get(modCC).add(curVertex);
+			}
+			else { 
+				ArrayList<String> newList = new ArrayList<String>();
+				newList.add(curVertex);
+				modifiedbyWCC.put(modCC, newList);
+			}
+		}
+	}
+
+	/* Use the "weights" in the backing graph to calculate weighted local CCs a la Barrat et al. */ 
+	public void calcBarratWCCs()
+	{
+		clusterCoeffsbyWCC = new TreeMap<Double,String>();
+		clusterCoeffsbyVertex = new TreeMap<String,Double>();
+		String curVertex;
+		double strength;
+		Set<String> allVertices = underlying.vertexSet();
+		Iterator<String> vIter = allVertices.iterator();
+		DefaultWeightedEdge curEdge;
+		strengths = new TreeMap<String,Double>();
+		double result, sum;
+		totalStrength = 0;
+		
+		while (vIter.hasNext()) {
+			strength = sum = 0;
+			curVertex = vIter.next();
+			List<String> neighbors = Graphs.neighborListOf(underlying, curVertex);
+			if (neighbors.size() > 1) {
+				int i,j;
+				for (i = 0; i < neighbors.size(); i++) {
+					curEdge = underlying.getEdge(curVertex, neighbors.get(i));
+					strength = strength + underlying.getEdgeWeight(curEdge);
+					for (j = i+1; j < neighbors.size(); j++) {
+						if (underlying.containsEdge(neighbors.get(i), neighbors.get(j))) {
+							sum += underlying.getEdgeWeight(curEdge);
+							sum += underlying.getEdgeWeight(underlying.getEdge(neighbors.get(j),curVertex));
+						}
+					}
+				}
+				strengths.put(curVertex, new Double(strength));
+				totalStrength += strength;
+				if (strength > 0) {
+					result = (1.0 / (strength * (neighbors.size() - 1))) * (sum);
+				}
+				else {
+					result = 0;
+				}
+			}
+			else {
+				strength = underlying.getEdgeWeight(underlying.getEdge(curVertex, neighbors.get(0)));
+				strengths.put(curVertex, new Double(strength));
+				totalStrength += strength;
+				result = 0; // define leaf nodes to have a WCC of 0
+			}
+			clusterCoeffsbyWCC.put(new Double(result), curVertex);
+			clusterCoeffsbyVertex.put(curVertex, new Double(result));
+//			System.out.println("Vertex " + curVertex + ": " + result);
+		}
+	}
+
+/* Not using this for now...
+	public void calcWalkProb() {
+		String allVertices[] = new String[underlying.vertexSet().size()];
+		underlying.vertexSet().toArray(allVertices);
+		walkProb = new double[allVertices.length][allVertices.length];
+		Arrays.sort(allVertices);
+		int i, j;
+		for (i = 0; i < allVertices.length; i++) {
+			for (j = 0; j < allVertices.length; j++ ) {
+				DefaultWeightedEdge e = underlying.getEdge(allVertices[i], allVertices[j]);
+				if (e != null) {
+					walkProb[i][j] = underlying.getEdgeWeight(e) / strengths.get(allVertices[i]);
+				}
+			}
+		}		
+	}
+
+
+	// Per Anderson, Chung, Lang
+	public TreeMap<String,Double> ApproxPR(String start) {
+		final double eps = 0.01;
+		TreeMap<String,Double> prob = new TreeMap<String,Double>();
+		TreeMap<String,Double> residual = new TreeMap<String,Double>();
+		LinkedList<String> myQ = new LinkedList<String>();
+		
+		residual.put(start,1.0);	// Starting distribution - just the initial seed node
+		String curNode = start;
+		double curR, curP, newR, newP;
+		
+		while (curNode != null) {
+			curR = residual.remove(curNode);
+			curP = prob.containsKey(curNode) ? prob.remove(curNode) : 0.0d; 
+			newR = (1 - restartProb) * curR / 2.0;
+			newP = curP + restartProb*curR;
+			
+			prob.put(curNode, newP);
+			residual.put(curNode, newR);
+			
+			
+			curNode = myQ.poll();
+		}
+		
+		return prob;
+	}
+*/
+
+	// Performs RWR
+	public TreeMap<Double,String> performRWR(String source) {
+		TreeMap<String,Double> result = new TreeMap<String,Double>();
+		TreeMap<String,Double> blank = new TreeMap<String,Double>();
+		TreeMap<String,Double> temp;
+		result.put(source, 1.0);
+		for (String vertex : underlying.vertexSet()) {
+			if (!vertex.equals(source)) {
+				result.put(vertex, 0.0);
+			}
+			blank.put(vertex, 0.0);
+		}
+		// For now, iterate RWR 100 times - can try more sophisticated conditions later
+		for (int i = 0; i < 100; i++) {
+			temp = (TreeMap<String, Double>) blank.clone();
+			for (DefaultWeightedEdge e : underlying.edgeSet()) {
+				double weight = underlying.getEdgeWeight(e);
+				if (weight > 0) {
+					String v1 = underlying.getEdgeSource(e);
+					String v2 = underlying.getEdgeTarget(e);
+					double p1 = temp.remove(v1);
+					double p2 = temp.remove(v2);
+					temp.put(v1, p1 + (1-lazy)*(1-restartProb)*(weight/strengths.get(v2))*result.get(v2) + (lazy)*(1-restartProb)*(weight/strengths.get(v1))*result.get(v1));
+					temp.put(v2, p2 + (1-lazy)*(1-restartProb)*(weight/strengths.get(v1))*result.get(v1) + (lazy)*(1-restartProb)*(weight/strengths.get(v2))*result.get(v2));
+				}
+			}
+			double ps = temp.remove(source);
+			for (String v : underlying.vertexSet()) {
+				ps += restartProb * result.get(v);
+			}
+			temp.put(source, ps);
+			result = temp;
+			
+			//Sanity check
+			// double sum = 0.0;
+			// for (String v : underlying.vertexSet()) {
+			// 	sum += result.get(v);
+			// }
+			// System.out.println("Probability sum: " + sum);
+		}
+		
+		TreeMap<Double,String> finalAnswer = new TreeMap<Double,String>();
+		for (Map.Entry<String,Double> entry : result.entrySet()) {
+			finalAnswer.put(entry.getValue(), entry.getKey());
+			//System.out.println(entry);
+		}
+		return finalAnswer;
+	}
+	
+	// 1 = modifiedWCC, 2 (or other) = intervals/L2-norm
+	public List<String> RWRVertexGrab(int mode) {
+		final double minProb = 0.0000000001d;
+		
+		String source;
+		Double maxValue;
+		
+		// Select source node
+		if (mode == 1) {
+			maxValue = modifiedbyWCC.lastKey();
+			source = modifiedbyWCC.get(maxValue).get(0);
+		}
+		else {
+			maxValue = egonetsbyCond.lastKey();
+			source = egonetsbyCond.get(maxValue).get(0);
+		}
+		
+		System.out.println("RWR source node: " + source);
+//		source = "4872";	// Selecting a burst node to see what happens.
+		
+		// Perform RWR
+		TreeMap<Double,String> RWRresult = performRWR(source);
+//		System.out.println(RWRresult.toString());
+		// NavigableSet<Double> probs = RWRresult.descendingKeySet();
+		
+		// Initialize result
+		Double curProb = RWRresult.lastKey();
+		Double sourceProb = curProb;
+		// System.out.println("curProb = " + curProb);
+		while (curProb.isNaN() || (curProb.isInfinite() && curProb > 0.0d)) {
+			System.out.println("ALERT! NaN or +INF key in RWR result (detected by RWRVertexGrab)");
+			curProb = RWRresult.lowerKey(curProb);
+		}
+		String curVertex = RWRresult.get(curProb);
+		List<String> result = new ArrayList<String>();
+		result.add(curVertex);
+		int curIndex = 0;
+		int bestIndex = 0;
+		double minCond = 1.0; // Best current value for minimum conductance
+		Double bestProb = curProb; // Best current # of vertices for minimum conductance
+		double curVolume = strengths.get(curVertex);
+		double curCuts = strengths.get(curVertex);
+		double outsideVolume = totalStrength - curVolume;
+
+		// Calculate conductance for each successive "swipe" along RWR probabilities; retain best one
+		// System.out.println("Start vertex: " + curVertex + "; curProb = " + curProb);
+		curProb = RWRresult.lowerKey(curProb);
+		if (curProb == null || curProb < minProb)
+		{
+			System.out.println("ALERT! Only one node detected by RWRVertexGrab. Exiting program...");
+			System.exit(1);
+		}
+		// System.out.println("curProb = " + curProb);
+		int replacementCounter = 0;
+		do {
+			curVertex = RWRresult.get(curProb);
+			curVolume += strengths.get(curVertex);
+			outsideVolume -= strengths.get(curVertex);
+			for (DefaultWeightedEdge e : underlying.edgesOf(curVertex)) {
+				String oppV = Graphs.getOppositeVertex(underlying, e, curVertex);
+				if (result.contains(oppV)) {
+					curCuts -= underlying.getEdgeWeight(e);
+				}
+				else {
+					curCuts += underlying.getEdgeWeight(e);
+				}
+			}			
+			result.add(curVertex);
+			curIndex++;
+			
+			// Calculate conductance and see if we have a new best
+			double curCond = curCuts / Math.min(curVolume, outsideVolume);
+//			double curCond = curCuts / curVolume;
+			if (curCond < minCond) {
+				replacementCounter++;
+				if (DEBUGOUTPUTLEVEL >= 50) {
+					System.out.println("index: " + curIndex + "; curCond: " + curCond + "; bestIndex: " + bestIndex + "; minCond: " + minCond);
+					System.out.println("curCuts: " + curCuts + "; curVolume: " + curVolume + "; outsideVolume: " + outsideVolume);
+					System.out.println("curVertex: " + curVertex + "; curProb: " + curProb);
+				}
+				minCond = curCond;
+				bestProb = curProb;
+				bestIndex = curIndex;
+//				try {
+//					Thread.sleep(200);
+//				} catch (InterruptedException e1) {
+//					// TODO Auto-generated catch block
+//					e1.printStackTrace();
+//				}
+			}
+
+			curProb = RWRresult.lowerKey(curProb);			
+		} while (curProb != null && curProb >= minProb);
+
+		System.out.println("Replacements: " + replacementCounter);
+		// FIX: use tailSet to get values over curProb; need to convert result to a TreeMap?
+		result = result.subList(0,bestIndex+1);
+		System.out.println("Size of result: " + result.size());
+		return result;
+	}
+	
+	public TreeSet<String> greedyVertexGrab() {
+		TreeSet<String> result = new TreeSet<String>();
+		//Double maxWCC = clusterCoeffsbyWCC.lastKey();
+		//String curVertex = clusterCoeffsbyWCC.get(maxWCC);
+		Double maxWCC = modifiedbyWCC.lastKey();
+		List<String> vList = modifiedbyWCC.get(maxWCC);
+		String curVertex = vList.get(0);
+		int vListCount = 1;
+//		performRWR(curVertex);
+		System.out.println("maxWCC: " + maxWCC + "; curVertex: " + curVertex + "; strength: " + strengths.get(curVertex));
+		while (strengths.get(curVertex).equals(new Double(0.0)))
+		{
+			if (vListCount < vList.size()) {
+				curVertex = vList.get(vListCount);
+				vListCount++;
+				System.out.println("maxWCC: " + maxWCC + "; curVertex: " + curVertex + "; strength: " + strengths.get(curVertex));
+			}
+			else {
+				//maxWCC = clusterCoeffsbyWCC.lowerKey(maxWCC); // will throw NPE when out of keys...
+				//curVertex = clusterCoeffsbyWCC.get(maxWCC);
+				maxWCC = modifiedbyWCC.lowerKey(maxWCC); // will throw NPE when out of keys...
+				vList = modifiedbyWCC.get(maxWCC);
+				curVertex = vList.get(0);
+				vListCount = 1;
+				System.out.println("maxWCC: " + maxWCC + "; curVertex: " + curVertex + "; strength: " + strengths.get(curVertex));
+			}
+		}
+		System.out.println("Edges of this vertex: " + underlying.edgesOf(curVertex).toString());
+		result.add(curVertex);
+		
+		double cutEdges = 0, insideStrength = 0, oldConductance, newConductance;
+		
+		for (DefaultWeightedEdge e : underlying.edgesOf(curVertex)) {
+			cutEdges += underlying.getEdgeWeight(e);
+		}
+		insideStrength = strengths.get(curVertex);
+		oldConductance = cutEdges / insideStrength;
+//		System.out.println("curVertex: " + curVertex + "; strength: " + strengths.get(curVertex));
+//		System.out.println("cutEdges: " + cutEdges + "; insideStrength: " + insideStrength + "; oldConductance: " + oldConductance);
+		
+		TreeMap<Double, String> neighbors = new TreeMap<Double,String>();
+		for (String s : Graphs.neighborListOf(underlying, curVertex)) {
+			//neighbors.put(clusterCoeffsbyVertex.get(s), s);
+			neighbors.put(modifiedbyVertex.get(s), s);
+		}
+		
+		Map.Entry<Double,String> curEntry;
+		
+		// Select neighboring vertex of highest WCC
+		while ((curEntry = neighbors.pollLastEntry()) != null) {	
+			curVertex = curEntry.getValue();
+			insideStrength += strengths.get(curVertex);
+			
+			// Edges connecting this vertex to rest of selection are now internal, not cut edges
+			// Other edges incident to this vertex are now cut edges, not external
+			for (DefaultWeightedEdge e : underlying.edgesOf(curVertex)) {
+				String nextVertex = Graphs.getOppositeVertex(underlying, e, curVertex);
+				if (result.contains(nextVertex)) {	// cut -> internal
+					cutEdges -= underlying.getEdgeWeight(e);
+				}
+				else {	// external -> cut
+					cutEdges += underlying.getEdgeWeight(e);
+					//neighbors.put(clusterCoeffsbyVertex.get(nextVertex), nextVertex);
+					neighbors.put(modifiedbyVertex.get(nextVertex), nextVertex);
+				}
+			}
+				
+			newConductance = cutEdges / insideStrength;
+//			System.out.println("curVertex: " + curVertex + "; strength: " + strengths.get(curVertex));
+//			System.out.println("cutEdges: " + cutEdges + "; insideStrength: " + insideStrength + "; newConductance: " + newConductance);
+			if (newConductance < oldConductance) {
+				oldConductance = newConductance;
+				result.add(curVertex);
+			}
+			else break;
+		}
+		
+		return result;
+	}
+	
+	/* Add 1 to weight for each interaction occurring >= startTime and < stopTime */
+	public void countInteractions(Double startTime, Double stopTime)
+	{
+		clearCounts();
+		double curWeight;
+		DefaultWeightedEdge curEdge;
+		NavigableMap<Double,DefaultWeightedEdge> window = interactions.subMap(startTime, true, stopTime, false);
+		NavigableSet<Double> times = window.navigableKeySet();
+		Iterator<Double> dIter = times.iterator();
+		while (dIter.hasNext()) {
+			curEdge = interactions.get(dIter.next());
+			curWeight = underlying.getEdgeWeight(curEdge) + 1.0;
+			underlying.setEdgeWeight(curEdge, curWeight);
+			if (maxWeight < curWeight) {
+				maxWeight = curWeight;
+			}
+		}
+		if (DEBUGOUTPUTLEVEL >= 5) {
+			System.out.println("Max weight = " + maxWeight);
+		}
+	}
+	
+	/* Use the "distance" (L2-norm) from a uniform distribution of interactions to calculate weights. */
+	/* Uses the countInteractions method first to get a count on number of interactions. */
+	public void interactionIntervalNorms(Double startTime, Double stopTime) {
+		countInteractions(startTime, stopTime);
+		Set<DefaultWeightedEdge> edges = underlying.edgeSet();
+		
+		double curWeight;
+		for (DefaultWeightedEdge curEdge : edges) {
+			curWeight = underlying.getEdgeWeight(curEdge);
+			
+			// Edges with 0 or 1 interaction in the current window get minimal weight
+			if (curWeight < 2) {
+				underlying.setEdgeWeight(curEdge, MINWEIGHT);
+				continue;
+			}
+			
+			int inCounter = 0;
+			double interval = (stopTime - startTime) / curWeight;
+			double lastTime = 0, normSum = 0, deviation;
+			NavigableSet<Double> temporary = interactionsByEdge.get(curEdge);
+			if (temporary == null) { 
+				System.out.println("panic");
+				System.out.println("curEdge = " + curEdge);
+				System.out.println("In the list? " + interactionsByEdge.containsKey(curEdge));
+				System.exit(-1);
+			}
+			for (Double timestamp : temporary) {
+				if (inCounter > 0) {
+					deviation = (timestamp - lastTime) - interval;
+					normSum += (deviation * deviation);					
+				}
+				lastTime = timestamp;
+				inCounter++;
+			}
+			
+			// underlying.setEdgeWeight(curEdge, Math.sqrt(normSum));
+			// Divide by curWeight to "normalize" by number of edges...
+			underlying.setEdgeWeight(curEdge, Math.sqrt(normSum)/curWeight);
+		}
+	}
+	
+	public List<Double> allIntervals(List<String> vertexSet) {
+		Double bestStartTime, bestStopTime;
+		Double conductance, lowestConductance;
+		DefaultWeightedEdge curEdge;
+		double internalVolume, externalVolume, cutEdges;
+		
+		TreeMap<Double, DefaultWeightedEdge> subsetInteractions = new TreeMap<Double, DefaultWeightedEdge>();
+		for (Double timestamp : interactions.navigableKeySet()) {
+			curEdge = interactions.get(timestamp);
+			if (vertexSet.contains(underlying.getEdgeSource(curEdge)) || vertexSet.contains(underlying.getEdgeTarget(curEdge))) {
+				subsetInteractions.put(timestamp, curEdge);
+			}
+		}
+		
+		System.out.println("allIntervals, testing " + subsetInteractions.size() + " interactions.");
+		
+		bestStartTime = new Double(0.0);
+		bestStopTime = new Double(0.0);
+		lowestConductance = new Double(1.0);
+		
+		int counter = 0;
+		
+		for (Double startTime : subsetInteractions.navigableKeySet()) {
+			curEdge = subsetInteractions.get(startTime);
+			String v1 = underlying.getEdgeSource(curEdge);
+			String v2 = underlying.getEdgeTarget(curEdge);
+			boolean b1 = vertexSet.contains(v1);
+			boolean b2 = vertexSet.contains(v2);
+			
+			if (!b1 && !b2) { continue; } 	// Don't start on an external edge.
+			
+			if (b1 && b2) { cutEdges = 0.0d; internalVolume = 2.0d; externalVolume = 0.0d; }
+			else { cutEdges = internalVolume = externalVolume = 1.0d; }
+			
+			
+			for (Double stopTime : subsetInteractions.tailMap(startTime, false).navigableKeySet()) {
+
+				curEdge = subsetInteractions.get(stopTime);
+				v1 = underlying.getEdgeSource(curEdge);
+				v2 = underlying.getEdgeTarget(curEdge);
+				b1 = vertexSet.contains(v1);
+				b2 = vertexSet.contains(v2);
+				
+				if (b1) {
+					internalVolume += 1.0;
+					if (b2) {
+						internalVolume += 1.0;
+					}
+					else {
+						externalVolume += 1.0;
+						cutEdges += 1.0;
+					}
+				}
+				else {
+					externalVolume += 1.0;
+					if (b2) {
+						internalVolume += 1.0;
+						cutEdges += 1.0;
+					}
+					else {
+						externalVolume += 1.0;
+					}					
+				}
+				// double denom = Math.min(internalVolume, externalVolume);
+				double denom = internalVolume;
+				if (denom > 0.0d) {
+					conductance = cutEdges / denom;
+//					System.out.println("conductance: " + conductance + "\tcuts: " + cutEdges + "\tinternal: " + internalVolume + "\texternal: " + externalVolume);
+					if (conductance < lowestConductance) {
+						bestStartTime = startTime;
+						bestStopTime = stopTime;
+						lowestConductance = conductance;
+					}
+				}
+				
+				if (DEBUGOUTPUTLEVEL >= 10) {
+					int N = 100000;
+					counter = (counter + 1) % N;
+					if (counter == 0) { System.out.println("Processed " + N + " interactions."); }
+				}
+			}
+			if (DEBUGOUTPUTLEVEL >= 10) {
+				//System.out.println("Finished interior loop.");
+			}
+		}
+		
+		ArrayList<Double> returnValue = new ArrayList<Double>();
+		returnValue.add(bestStartTime);
+		returnValue.add(bestStopTime);
+		return returnValue;
+	}
+	
+	/**
+	 * Iterates over all edges in the underlying graph, generating interactions along those edges.
+	 * Timestamps for the interactions will be in the range [0, maxTime). An exponential probability
+	 * distribution with rate parameter avgNum/maxTime is used to determine the time of the next interaction
+	 * on each edge; when this time reaches maxTime, the interaction is ignored and the next edge is considered.
+	 *  
+	 * @param avgNum The expected number of interactions for each underlying edge over the full time interval
+	 * @param maxTime The length of the full time interval
+	 */
+	public void generateNewInteractions(int avgNum, double maxTime) {
+		if (maxTime > endTime)
+		{
+			endTime = maxTime;
+		}
+		
+		Random randGen = new Random();
+		long seed = randGen.nextLong();
+		System.out.println("Random seed = " + seed);
+		randGen = new Random(seed);
+		double x;
+		double curTime;
+		double gap;
+		
+		for (DefaultWeightedEdge curEdge : underlying.edgeSet()) {
+			curTime = 0;
+			x = randGen.nextDouble();
+			gap = -1*Math.log(1-x)/(avgNum/maxTime);
+			// System.out.println("Adding interactions: ");
+			while (curTime + gap < maxTime)
+			{
+				if (gap > epsilon) {
+					curTime += gap;
+					interactions.put(new Double(curTime), curEdge);
+					if (interactionsByEdge.containsKey(curEdge)) {
+						// System.out.print("Y" + curEdge.toString() + "\t");
+						interactionsByEdge.get(curEdge).add(curTime);
+						NavigableSet<Double> temporary = interactionsByEdge.get(curEdge);
+						if (temporary == null) {
+							System.out.println("Failed to add subsequent item.");
+							System.out.println("curEdge = " + curEdge.toString());
+							System.exit(-1);
+						}						
+					}
+					else {
+						// System.out.print("N" + curEdge.toString() + "\t");
+						TreeSet<Double> newList = new TreeSet<Double>();
+						newList.add(curTime);
+						interactionsByEdge.put(curEdge, newList);
+						NavigableSet<Double> temporary = interactionsByEdge.get(curEdge);
+						if (temporary == null) {
+							System.out.println("Failed to add first item.");
+							System.out.println("curEdge = " + curEdge.toString() + "; newList = " + newList.toString());
+							System.exit(-1);
+						}
+					}
+				}
+				x = randGen.nextDouble();
+				gap = -1*Math.log(1-x)/(avgNum/maxTime);
+			}
+			System.out.println("");
+		}
+	}
+	
+	/* NOTE: Throws exception when same node is selected twice. */
+	public ArrayList<String> simpleAddBurst(int numNodes, double startTime, double stopTime, int numInteractions) {
+		if (startTime < 0 || stopTime > endTime) {
+			return null;
+		}
+		Set<String> vertices = underlying.vertexSet();
+		int graphSize = vertices.size();
+		Iterator<String> vIter = vertices.iterator();
+		LinkedHashSet<DefaultWeightedEdge> burstEdges = new LinkedHashSet<DefaultWeightedEdge>();
+		Random randGen = new Random();
+		String vertex = null;
+		ArrayList<String> selectedVertices = new ArrayList<String>();
+		
+		/* Select numNodes vertices at random from the graph */
+		for (int v = 0; v < numNodes; v++) {
+			int advance = randGen.nextInt(graphSize);
+			int count = 0;
+			while (count < advance) {
+				if (vIter.hasNext()) {
+					count++;
+					vertex = vIter.next();
+				}
+				else {
+					vIter = vertices.iterator();
+				}
+			}
+			if (!selectedVertices.contains(vertex)) {
+				selectedVertices.add(vertex);
+			}
+		}
+		
+		ArrayList<String> temp = (ArrayList<String>) selectedVertices.clone();
+		Collections.sort(temp);
+
+		DefaultWeightedEdge curEdge;
+		/* Generate edges for complete subgraph on selectedVertices, adding to underlying graph as needed. */
+		for (int v = 0; v < selectedVertices.size(); v++) {
+			for (int w = v+1; w < selectedVertices.size(); w++) {
+				curEdge = underlying.getEdge(selectedVertices.get(v), selectedVertices.get(w));
+				if (curEdge == null) {
+					curEdge = underlying.addEdge(selectedVertices.get(v), selectedVertices.get(w));					
+				}
+				burstEdges.add(curEdge);				
+			}
+		}
+//		System.out.println("Burst edges generated: ");
+//		System.out.println(burstEdges.toString());
+
+//		System.out.println("Burst interactions: ");
+		/* Create interactions for these edges. */
+		/* NOTE: This code is copied & modified from previous method; should pull out into new method later. */
+		Iterator<DefaultWeightedEdge> eIter = burstEdges.iterator();
+		double x;
+		double curTime;
+		double gap;
+		
+		while (eIter.hasNext()) {
+			curEdge = eIter.next();		
+			
+			curTime = startTime;
+			x = randGen.nextDouble();
+			gap = -1*Math.log(1-x)/(numInteractions/(stopTime - startTime));
+			while (curTime + gap < stopTime)
+			{
+				if (gap > epsilon) {
+					curTime += gap;
+					interactions.put(new Double(curTime), curEdge);
+					if (interactionsByEdge.containsKey(curEdge)) {
+						interactionsByEdge.get(curEdge).add(curTime);
+						NavigableSet<Double> temporary = interactionsByEdge.get(curEdge);
+						if (temporary == null) {
+							System.out.println("Failed to add first item.");
+							System.out.println("curEdge = " + curEdge.toString());
+							System.exit(-1);
+						}
+					}
+					else {
+						TreeSet<Double> newList = new TreeSet<Double>();
+						newList.add(curTime);
+						interactionsByEdge.put(curEdge, newList);
+						NavigableSet<Double> temporary = interactionsByEdge.get(curEdge);
+						if (temporary == null) {
+							System.out.println("Failed to add first item.");
+							System.out.println("curEdge = " + curEdge.toString() + "; newList = " + newList.toString());
+							System.exit(-1);
+						}
+					}
+				}
+				x = randGen.nextDouble();
+				gap = -1*Math.log(1-x)/(numInteractions/(stopTime - startTime));
+			}
+		}
+		
+		return temp;
+	}
+	
+	TreeSet<TemporalID>[] calcTemporalNeighborhood(String vertex, int t, int numSteps) {
+		TreeSet<TemporalID>[] result = (TreeSet<TemporalID>[])new TreeSet[numSteps+1];
+		TemporalID temp; // *rimshot*
+		
+		// Create blank ArrayLists
+		for (int i = 0; i <= numSteps; i++) {
+			result[i] = new TreeSet<TemporalID>();
+		}
+		
+		// Add the source node/time pair as the only element at 0 steps away
+		TemporalID vt = new TemporalID(vertex, t);
+		result[0].add(vt);
+		
+		// Iteratively generate nodes at progressively larger distances
+		for (int i = 1; i <= numSteps; i++) {
+			for (TemporalID tid : result[i-1]) {
+				
+				result[i].add(tid);	// If reachable in i-1 steps, then reachable in i steps.
+				
+				if (tid.time > 0) {	// Same node, 1 step back in time
+					temp = new TemporalID(tid.vertex, tid.time-1);
+					result[i].add(temp);
+				}
+				
+				if (tid.time + 1 < endTime) { // Same node, 1 step forward in time
+					temp = new TemporalID(tid.vertex, tid.time+1);
+					result[i].add(temp);					
+				}
+				
+				// Get the interactions for each edge incident on this vertex in the desired tick
+				Set<DefaultWeightedEdge> myEdges = underlying.edgesOf(tid.vertex);
+				for (DefaultWeightedEdge e: myEdges) {
+					NavigableSet<Double> myInts = interactionsByEdge.get(e).subSet(0.0d+tid.time, true, 0.0d+tid.time+1, false);
+					if (myInts.size() > 0) {
+						temp = new TemporalID(Graphs.getOppositeVertex(underlying, e, tid.vertex), tid.time);
+						result[i].add(temp);						
+					}
+				}
+				
+				// This is STUPID - do it the other way. (i.e. use interactionsByEdge)
+				/* ************
+				Collection<DefaultWeightedEdge> timeSlice = interactions.subMap(t+0.0d, t+1.0d).values();
+				for (DefaultWeightedEdge e : timeSlice) {
+					if (Graphs.testIncidence(underlying,e,vertex)) {
+						temp = new TemporalID(Graphs.getOppositeVertex(underlying, e, tid.vertex), tid.time);
+						result[i].add(temp);
+					}
+				}
+				* ************* */
+			}
+		}
+		
+		
+		return result;
+	}
+
+	private class myVF implements VertexFactory<String> {
+		public String createVertex() {
+			String value = "" + nextVertexNum;
+			nextVertexNum++;
+			return value;
+		}
+	}
+}

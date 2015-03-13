@@ -1,0 +1,540 @@
+import java.util.*;
+import java.io.*;
+
+import org.jgrapht.graph.*;
+
+public class BurstyCommunities {
+	private static final int DEBUGOUTPUTLEVEL = 20;
+		// 100 - conductance for every edge
+		// 50 - new sums & thisResult in Kadane's algorithm
+		// 20 - new max & min conductances
+
+	private static final int PROGRAMMODE = 2;
+		// 1 = modified WCCs
+		// 2 = intervals & L2-norms
+	
+	private static final int NV = 10000;					// Number of vertices in underlying graph
+	private static final int NI = 50;					// Average number of interactions per edge
+	private static final double MAXTIME = 100.0;		// The end of time (for this experiment)
+	private static final double startBurst = 15.0;		// The time of the beginning of the burst
+	private static final double endBurst = 25.0;		// The time of the end of the burst
+	private static final int burstNodes = 10;			// The number of nodes involved in the burst
+	private static final int burstInteractions = 50;	// The number of additional interactions added per vertex (defunct)
+	private static final double burstConductance = 0.0d;	// The desired conductance of the injected burst
+	private static final double epsilon = 0.0000000000001;	// minimum amount of time between interactions
+	private static final int goodEdge = 23;
+	private static final int badEdge = 10;
+	private static final double minInterval = 1.0;
+	private static final boolean makeNewGraph = true;
+	private static final String graphFileName = "new_igraph1.txt";
+	private static final double conductanceBar = 0.54;
+	private static final boolean initialSlidingWindow = true;
+	private static final double slidingWindowSize = 10.0;
+
+	
+	public static void main(String args[])
+	{
+		InteractionGraph test;
+		test = new InteractionGraph(epsilon);
+		ArrayList<String> burst;
+		if (makeNewGraph) {
+			/* Generate interaction graph */
+			test.createUnderlying(NV);
+			test.generateNewInteractions(NI, MAXTIME);
+			// burst = test.simpleAddBurst(burstNodes, startBurst, endBurst, burstInteractions);
+			burst = test.rewireAddBurst(burstNodes, startBurst, endBurst, burstConductance);
+			
+			/* Store interaction graph to file */
+			try {
+				PrintWriter outFile = new PrintWriter(new FileWriter(graphFileName));
+				outFile.print(burst.size() + "\n");
+				for (String s : burst) {
+					outFile.print(s + " ");
+				}
+				outFile.print("\n");
+				Set<String> vertices = test.underlying.vertexSet();
+				outFile.print(vertices.size() + "\n");
+				for (String s : vertices) {
+					outFile.print(s + " ");
+				}
+				outFile.print("\n");
+				Set<DefaultWeightedEdge> edges = test.underlying.edgeSet();
+				outFile.print(edges.size() + "\n");
+				for (DefaultWeightedEdge e : edges) {
+					outFile.print(test.underlying.getEdgeSource(e) + ";" + test.underlying.getEdgeTarget(e) + " ");
+				}
+				outFile.print("\n");
+				NavigableSet<Double> times = test.interactions.navigableKeySet();
+				outFile.print(times.size() + "\n");
+				for (Double t : times) {
+					outFile.print(t + ";" + test.underlying.getEdgeSource(test.interactions.get(t)) + ";" + test.underlying.getEdgeTarget(test.interactions.get(t)) + " ");
+				}
+				outFile.print("\n");
+				outFile.close();
+			} catch (IOException e1) {
+				System.out.println("ERROR: Cannot create file to write new graph");
+			}
+		}
+		
+		/* Read interaction graph from file */
+		else {
+			burst = new ArrayList<String>();
+			try {
+				Scanner inFile = new Scanner(new File(graphFileName));
+				int i = Integer.parseInt(inFile.next());	// read burst
+				while (i > 0) {
+					i--;
+					burst.add(inFile.next());
+				}
+				i = Integer.parseInt(inFile.next());		// read vertices
+				while (i > 0) {
+					i--;
+					test.underlying.addVertex(inFile.next());
+				}
+				i = Integer.parseInt(inFile.next());		// read edges
+				while (i > 0) {
+					i--;
+					String s[] = inFile.next().split(";");
+					test.underlying.addEdge(s[0], s[1]);
+				}
+				i = Integer.parseInt(inFile.next());		// read interactions
+				while (i > 0) {
+					i--;
+					String s[] = inFile.next().split(";");
+					test.interactions.put(Double.valueOf(s[0]), test.underlying.getEdge(s[1], s[2]));
+					if (test.interactionsByEdge.containsKey(test.underlying.getEdge(s[1],s[2]))) {
+						test.interactionsByEdge.get(test.underlying.getEdge(s[1],s[2])).add(Double.valueOf(s[0]));
+					}
+					else {
+						TreeSet<Double> newList = new TreeSet<Double>();
+						newList.add(Double.valueOf(s[0]));
+						test.interactionsByEdge.put(test.underlying.getEdge(s[1],s[2]), newList);
+					}
+				}
+				inFile.close();
+			} catch (FileNotFoundException e) {
+				System.out.println("ERROR: Cannot open file to read new graph");
+				System.exit(-1);
+			} catch (NoSuchElementException n) {
+				System.out.println("ERROR: Incorrect file format");
+			}
+		}
+		System.out.println("Graph contains " + test.underlying.vertexSet().size() + " vertices and " + test.underlying.edgeSet().size() + " edges.");
+		System.out.println("Total interactions: " + test.interactions.size());
+		
+		System.out.println("Burst vertices selected: ");
+		Collections.sort(burst);
+		System.out.println(burst.toString());
+
+		Double initialStart = 0.0d;
+		Double initialStop = MAXTIME;
+		
+		if (initialSlidingWindow) {
+			NavigableSet<Double> times = test.interactions.navigableKeySet();
+			double bestEnd = slidingWindowSize;
+			double bestCount = times.headSet(slidingWindowSize).size();
+			double curCount = bestCount;
+			Double startTime = times.ceiling(0.0d);
+			for (Double endTime : times.tailSet(slidingWindowSize, false)) {
+				curCount++;
+				while (startTime < (endTime - slidingWindowSize)) {
+					curCount--;
+					startTime = times.higher(startTime);
+				}
+				
+				if (curCount > bestCount) {
+					bestCount = curCount;
+					bestEnd = endTime;
+				}
+			}
+			
+			initialStart = bestEnd - slidingWindowSize;
+			initialStop = bestEnd;
+			System.out.println("Initial window selected: " + initialStart + " to " + initialStop);
+		}
+		
+		System.out.println("Maximum memory available: " + Runtime.getRuntime().maxMemory());
+		
+		/************************************************************
+		 *  BEGIN SECTION - Macropol et al. LSH & pruning algorithm *
+		 ************************************************************/
+		 
+		/* Graph hashing constants */
+		final int STEPS = 2;
+		final int BANDS = 4;
+		final int ROWSPERBAND = 40;
+		final int NUMHASHES = BANDS * ROWSPERBAND;
+		final int MAXHASH = 1000003;	// First prime number after NV * maxTime
+		final int ENDTIME = (int) MAXTIME;
+		
+		/*
+		// Macropol constants
+		final int SIGLENGTH = 10;
+		final int W = 2*NUMHASHES;		// I have no idea what this parameter is/does.
+		final int S_MAX = 20;
+		*/
+		
+		/* Random values for minhash functions */
+		Random hashgen = new Random();
+		int mha[] = new int[NUMHASHES];
+		int mhb[] = new int[NUMHASHES];
+		for (int j = 0; j < NUMHASHES; j++) {
+			mha[j] = hashgen.nextInt(MAXHASH);
+			mhb[j] = hashgen.nextInt(MAXHASH);
+		}
+		
+		// Straight implementation of LSH from Ullman (textbook, ch. 3)
+		Hashtable sigTables[] = new Hashtable[BANDS];
+		for (int i = 0; i < BANDS; i++) {
+			sigTables[i] = new Hashtable<String,ArrayList<Long>>(NV*ENDTIME);
+		}
+		TreeSet<TemporalID> neighborhood = null;
+		int min[];
+		int maxmin[] = new int[NUMHASHES];
+		for (int i = 0; i < NUMHASHES; i++) {
+			maxmin[i] = Integer.MAX_VALUE; 
+		}
+		
+		System.out.println("Begin hashing: " + new Date());
+
+		int t_begin = 0;
+		int t_end = ENDTIME;
+		short neighborhoodSize[] = new short[NV*ENDTIME];
+		for (String v : test.underlying.vertexSet()) {
+			for (int t = t_begin; t < t_end; t++) {
+				Long myID = new Long(t*NV+Long.parseLong(v));
+				neighborhood = test.calcTemporalNeighborhood(v, t, STEPS)[STEPS];
+				neighborhoodSize[myID.intValue()] = (short)neighborhood.size();
+				min = maxmin.clone();
+				for (TemporalID n : neighborhood) {
+					for (int i = 0; i < NUMHASHES; i++) {
+						int newValue = (int) ((mha[i]*(n.time*NV+Long.parseLong(n.vertex)) + mhb[i]) % MAXHASH);
+						if (newValue < min[i]) { min[i] = newValue; }
+					}
+				}
+				for (int j = 0; j < BANDS; j++) {
+					String sig = "";
+					for (int k = 0; k < ROWSPERBAND; k++) {
+						sig += min[j*ROWSPERBAND + k];
+					}
+					if (sigTables[j].containsKey(sig)) {
+						((ArrayList<Long>) sigTables[j].get(sig)).add(myID);
+					}
+					else {
+						ArrayList<Long> newList = new ArrayList<Long>();
+						newList.add(myID);
+						sigTables[j].put(sig, newList);
+					}
+				}	
+			}
+		}
+		
+		System.out.println("End hashing: " + new Date());
+		
+		System.out.println("Candidate lists: ");
+		TreeMap<Integer,Integer> results = new TreeMap<Integer,Integer>();
+		for (int i = 0; i < BANDS; i++) {
+			for (ArrayList<Long> coll : (Collection<ArrayList<Long>>)sigTables[i].values()) {
+				if (coll.size() > 1) {
+//					short max_n = 0;
+//					short min_n = Short.MAX_VALUE;
+					System.out.print("[");
+					for (Long l : coll) { 
+						System.out.print(neighborhoodSize[l.intValue()] + ":" + l + ",");
+						
+//						if (neighborhoodSize[l.intValue()] > max_n) {
+//							max_n = neighborhoodSize[l.intValue()];
+//						}
+					}
+					System.out.println("]");
+//					System.out.println("" + max_n + ": " + coll);
+					Integer q = results.get(coll.size());
+					if (q == null) {
+						results.put(coll.size(), 1);
+					}
+					else {
+						results.put(coll.size(), q+1);
+					}
+				}
+			}
+		}
+		System.out.println("Output summary: ");
+		System.out.println(results);
+
+		System.out.println("\nInspection mode. ");
+		Scanner sc = new Scanner(System.in);
+		System.out.println("Enter a vertex: ");
+		String v = sc.nextLine();
+		while (!v.equals("-1")) {
+			for (DefaultWeightedEdge e : test.underlying.edgesOf(v)) {
+				System.out.println("Edge: " + e);
+				System.out.println("Interaction times: ");
+				for (Double d : test.interactionsByEdge.get(e)) {
+					System.out.println("\t" + d.intValue());
+				}
+			}
+			System.out.println("Enter a vertex: ");
+			v = sc.nextLine();
+		}
+		System.exit(0);
+		
+		/*
+		// More Macropol stuff
+		int sig[][] = new int[W][SIGLENGTH];
+		for (int i = 0; i < W; i++) {
+			for (int j = 0; j < SIGLENGTH; j++) {
+				sig[i][j] = hashgen.nextInt(NUMHASHES);
+			}
+		}
+		*/
+		
+		/*
+		// Macropol algorithm 2 (Graph Pruning)
+		TreeMap<Double,TemporalID> heap = new TreeMap<Double,TemporalID>();
+		for (String v : test.underlying.vertexSet()) {
+			for (int i = 0; i < ENDTIME; i++) {
+				HashMap<String,String> H = new HashMap<String,String>();
+
+				
+			}
+		}
+		*/
+		
+		/*
+		// Macropol algorithm 1 (Graph Hashing)
+		HashMap<String,String> graphHash = new HashMap<String,String>();
+		TreeSet<String> T = null;
+		TreeSet<TemporalID> neighborhood = null;
+		int counter = 0;
+		int minhash_value[] = new int[NUMHASHES];
+		try { 
+			System.out.println("Begin hashing: " + new Date());
+			for (String v : test.underlying.vertexSet()) {
+				for (int i = 0; i < ENDTIME; i++) {
+					neighborhood = test.calcTemporalNeighborhood(v, i, STEPS)[STEPS];
+					for (int j = 0; j < NUMHASHES; j++) {
+						minhash_value[j] = Integer.MAX_VALUE;
+						for (TemporalID tid : neighborhood) {
+							int newValue = (int) ((mha[j]*(tid.time+ENDTIME*Long.parseLong(tid.vertex)) + mhb[j]) % MAXHASH);
+							if (newValue < minhash_value[j]) { minhash_value[j] = newValue; }
+						}
+					}
+					for (int j = 0; j < W; j++) {
+						T = new TreeSet<String>(); // signature
+						for (int k = 0; k < SIGLENGTH; k++) {
+							T.add("" + minhash_value[sig[j][k]]);
+						}
+						String s = "";
+						for (String t : T) {
+							s += t;
+						}
+						graphHash.put(s, v);
+					}	
+				
+				}
+				counter++;
+				if (counter > 1500) {
+					System.out.println("Finished " + counter + " vertices.");
+					System.out.println("Free memory: " + Runtime.getRuntime().freeMemory());
+				}
+			}
+		}
+		catch (OutOfMemoryError e){
+			System.out.println("HashMap size: " + graphHash.size());
+			System.out.println("T size: " + T.size());
+			System.out.println("neighborhood size: " + neighborhood.size());
+			System.out.println("Dead at: " + new Date());
+		}
+				
+		System.out.println("End hashing: " + new Date());
+		System.exit(0);
+		
+		
+		/************************************************************
+		 *  END SECTION - Macropol et al. LSH & pruning algorithm   *
+		 ************************************************************/
+
+		if (PROGRAMMODE == 1) {
+			test.countInteractions(initialStart, initialStop);
+//			test.displayCounts();
+			
+			test.calcWCCs();
+			System.out.println("Maximum modified WCC: " + test.modifiedbyWCC.lastKey() + "; Minimum modified WCC: " + test.modifiedbyWCC.firstKey());
+			for (String s : burst) {
+				Double d = test.modifiedbyVertex.get(s);
+				// Probably wrong due to duplicate keys in modifiedbyWCC
+				System.out.println("\t" + s + ": " + d + "; " + (test.modifiedbyWCC.headMap(d,true).size()+(test.modifiedbyVertex.size()-test.modifiedbyWCC.size()))/100.00 + "%"); 
+			}
+			//System.out.println(test.modifiedbyWCC.toString());
+			System.out.println("Unique keys: " + test.modifiedbyWCC.size());
+			System.out.println("Unique vertices: " + test.modifiedbyVertex.size());
+		}
+		else {
+			test.countInteractions(initialStart, initialStop);
+			test.calcWCCs();
+			test.interactionIntervalNorms(initialStart, initialStop);
+			test.calcEgonetConductances();
+			test.countInteractions(initialStart, initialStop);
+			test.calcWCCs();
+		}
+		
+//		TreeSet<String> newResult = test.greedyVertexGrab();
+		List<String> newResult = test.RWRVertexGrab(PROGRAMMODE);
+		Collections.sort(newResult);
+		System.out.println("Result of VertexGrab: ");
+		System.out.println(newResult.toString());
+//		TreeSet<String> oldResult = new TreeSet<String>();
+		List<String> oldResult = new ArrayList<String>();
+		
+		while (!newResult.equals(oldResult) && newResult.size() > 1)
+		{
+			double maxStartTime = 0, maxEndTime = 0;
+			oldResult = newResult;
+			
+// Old window-selection algorithm			
+//			double currentStartTime = 0;
+//			double maxSum = 0, currentMaxSum = 0;
+//			DefaultWeightedEdge curEdge;
+//			double internalVolume = 0.0d, externalVolume = 0.0d, cutEdges = 0.0d;
+//			double maxConductance = 0;
+//			double minConductance = Double.POSITIVE_INFINITY;
+//			
+//			// A modified version of Kadane's algorithm for the Maximum Subarray Problem
+//			for (Double curTime : test.interactions.navigableKeySet()) {
+//				curEdge = test.interactions.get(curTime);
+//				String v1 = test.underlying.getEdgeSource(curEdge);
+//				String v2 = test.underlying.getEdgeTarget(curEdge);
+//				boolean b1 = oldResult.contains(v1);
+//				boolean b2 = oldResult.contains(v2);
+//
+//	// Old version			
+//
+//				// Edges completely external to the target set are ignored
+//				if (b1 || b2) {
+////					System.out.print("v1 = " + v1 + "; v2 = " + v2);
+//					if (b1 && b2) {
+//						currentMaxSum += goodEdge;
+////						System.out.println("   good");
+//					}
+//					else {
+//						currentMaxSum -= badEdge;
+////						System.out.println("   bad");
+//					}
+//					if ((currentMaxSum > maxSum) && (curTime - currentStartTime >= minInterval) ) {
+//						maxSum = currentMaxSum;
+//						maxStartTime = currentStartTime;
+//						maxEndTime = curTime + epsilon/2;
+//					}
+//					if (currentMaxSum < 0) {
+//						currentMaxSum = 0;
+//						currentStartTime = curTime + epsilon/2;
+//					}
+//				}				
+// 
+//
+//	// New version - uses (0.5 - conductance)
+//				if (b1) {
+//					internalVolume += 1.0;
+//					if (b2) {
+//						internalVolume += 1.0;
+//					}
+//					else {
+//						externalVolume += 1.0;
+//						cutEdges += 1.0;
+//					}
+//				}
+//				else {
+//					externalVolume += 1.0;
+//					if (b2) {
+//						internalVolume += 1.0;
+//						cutEdges += 1.0;
+//					}
+//					else {
+//						externalVolume += 1.0;
+//					}					
+//				}
+//				double denom = Math.min(internalVolume, externalVolume);
+//				if (denom > 0.0d) {
+//					double conductance = cutEdges / denom;
+//					if (DEBUGOUTPUTLEVEL >= 100) {
+//						System.out.println("conductance = " + conductance + "\tcutEdges = " + cutEdges + "\tinternal = " + internalVolume + "\texternal = " + externalVolume);
+//					}
+//					if (DEBUGOUTPUTLEVEL >= 20) {
+//						if (conductance > maxConductance) { System.out.println("New max conductance: " + conductance + ";\t time = " + curTime); }
+//						if (conductance < minConductance) { System.out.println("New min conductance: " + conductance + ";\t time = " + curTime); }
+//					}
+//					if (conductance > maxConductance) { maxConductance = conductance; }
+//					if (conductance < minConductance) { minConductance = conductance; }
+//					double thisResult = conductanceBar - conductance;
+//					if (DEBUGOUTPUTLEVEL >= 50) {
+//						System.out.println("thisResult = " + thisResult);
+//					}
+//					currentMaxSum += thisResult;
+//					if (DEBUGOUTPUTLEVEL >= 50) {
+//						System.out.println("currentMaxSum = " + currentMaxSum);
+//					}
+//					if (currentStartTime < epsilon) { currentStartTime = curTime; }
+//					if (currentMaxSum < 0) { 		// start a new run with next element
+//						currentStartTime = 0;
+//						currentMaxSum = 0;
+//					}
+//					else {
+//						if (currentMaxSum > maxSum) {
+//							if (DEBUGOUTPUTLEVEL >= 10) {
+//							//	System.out.println("New max sum! Time: " + curTime + "\tEdge: " + curEdge.toString() + "\tSum: " + currentMaxSum);
+//							}
+//							maxSum = currentMaxSum;
+//							maxStartTime = currentStartTime;
+//							maxEndTime = curTime;
+//						}
+//					}
+//				}			
+//
+//
+//			}
+//			System.out.println("maxSum: " + maxSum + "; startTime: " + maxStartTime + "; endTime: " + maxEndTime);
+//			System.out.println("maxConductance: " + maxConductance);
+
+			List<Double> windowResult = test.allIntervals(oldResult);
+			maxStartTime = windowResult.get(0);
+			maxEndTime = windowResult.get(1);
+			System.out.println("startTime: " + maxStartTime + "; endTime: " + maxEndTime);
+			
+			if (PROGRAMMODE == 1) {
+				test.countInteractions(new Double(maxStartTime), new Double(maxEndTime));
+				test.calcWCCs();
+			}
+			else {
+				test.countInteractions(new Double(maxStartTime), new Double(maxEndTime));
+				test.calcWCCs();
+				test.interactionIntervalNorms(new Double(maxStartTime), new Double(maxEndTime));
+				test.calcEgonetConductances();
+				test.countInteractions(new Double(maxStartTime), new Double(maxEndTime));
+				test.calcWCCs();
+			}
+//			test.displayCounts();
+//			newResult = test.greedyVertexGrab();
+			newResult = test.RWRVertexGrab(PROGRAMMODE);
+			Collections.sort(newResult);
+			System.out.println("Result of VertexGrab: ");
+			System.out.println(newResult.toString());
+		}
+		
+		System.out.println("\nInspection mode. ");
+		System.out.println("Enter a vertex: ");
+		Scanner scan = new Scanner(System.in);
+		String v2 = scan.nextLine();
+		while (!v2.equals("-1")) {
+			System.out.println("Strength: " + test.strengths.get(v2));
+			System.out.println("Edges & weights: ");
+			for (DefaultWeightedEdge e : test.underlying.edgesOf(v2)) {
+				System.out.print(e.toString() + " | " + test.underlying.getEdgeWeight(e) + " ; ");
+			}
+			System.out.println("\nEnter a vertex: ");
+			v2 = scan.nextLine();
+		}
+				
+		scan.close();
+	}
+
+}
