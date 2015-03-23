@@ -43,14 +43,7 @@ public class BurstyCommunities {
 			test.generateNewInteractions(NI, MAXTIME);
 			// burst = test.simpleAddBurst(burstNodes, startBurst, endBurst, burstInteractions);
 			burst = test.rewireAddBurst(burstNodes, startBurst, endBurst, burstConductance);
-			
-			for (String v : burst) {
-				System.out.println(v + ": " + test.underlying.edgesOf(v));
-			}
-			
-			
 			System.exit(0);
-			
 			/* Store interaction graph to file */
 			try {
 				PrintWriter outFile = new PrintWriter(new FileWriter(graphFileName));

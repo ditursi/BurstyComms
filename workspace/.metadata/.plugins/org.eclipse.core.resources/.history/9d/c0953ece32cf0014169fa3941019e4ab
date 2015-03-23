@@ -893,10 +893,10 @@ public class InteractionGraph {
 
 	// Note - edges will be rewired until conductance is <= desiredConductance
 	public ArrayList<String> rewireAddBurst(int numNodes, double startTime, double stopTime, double desiredMaxConductance) {
-		final int MAXATTEMPTS = 50000;
-		final int MINNEIGHBORS = 1;
-		final double MAXDEGREEFRACTION = 0.02;
-		final double MINDENSITY = 0.5;
+		final int MAXATTEMPTS = 1000;
+		final int MINNEIGHBORS = 3;
+		final double MAXDEGREEFRACTION = 1;
+		final double MINDENSITY = 0.4;
 		
 		if (startTime < 0 || stopTime > endTime || stopTime <= startTime) {
 			return null;
@@ -1118,40 +1118,8 @@ public class InteractionGraph {
 		return result;
 	}
 
-	// Uses width within current timeslice; then, from same node, checks "flat" neighborhoods
-	// of the same width within +/- t, keeping only nodes in the original timeslice's neighborhood
-	TreeSet<TemporalID> calcTemporalCylinder(String vertex, int t, int width, int timeDepth) {
-		TreeSet<TemporalID> result = new TreeSet<TemporalID>();
-
-		// Current timestep
-		result.addAll(calcNowNeighborhood(vertex,t,width));
-		TreeSet<String> now = calcNowNodes(vertex,t,width);
-		TreeSet<String> then;
-		
-		int i = 1;
-		while (i <= timeDepth) {
-			if (t-i >= 0) {
-				then = calcNowNodes(vertex, t-i, width);
-				then.retainAll(now);
-				for (String s : then) {
-					result.add(new TemporalID(s,t-i));
-				}
-			}
-			if (t+i < endTime) {
-				then = calcNowNodes(vertex, t+i, width);
-				then.retainAll(now);
-				for (String s : then) {
-					result.add(new TemporalID(s,t+i));
-				}
-			}
-			i++;
-		}
-
-		return result;
-	}
-	
 	// Get "flat" neighborhoods of specified radius ("width") at current time as well as +/- timeDepth
-	TreeSet<TemporalID> calcTimesliceNeighborhoods(String vertex, int t, int width, int timeDepth) {
+	TreeSet<TemporalID> calcTemporalCylinder(String vertex, int t, int width, int timeDepth) {
 		TreeSet<TemporalID> result = new TreeSet<TemporalID>();
 
 		// Current timestep
@@ -1169,42 +1137,6 @@ public class InteractionGraph {
 		}
 
 		return result;
-	}
-	
-	TreeSet<String> calcNowNodes(String vertex, int t, int width) {
-		TreeSet<String> nodes = new TreeSet<String>();
-		TreeSet<String> newnodes = new TreeSet<String>();
-		
-		// Source node
-		newnodes.add(vertex);
-		
-		while (width > 0) {
-			TreeSet<DefaultWeightedEdge> extension = new TreeSet<DefaultWeightedEdge>(eComparator);
-			for (String v : newnodes) {				
-				extension.addAll(underlying.edgesOf(v));
-			}
-			nodes.addAll(newnodes);
-			newnodes.clear();
-			
-			// Process all edges from the new nodes; if they lead to a new node that has an interaction in the desired
-			// timeframe, add that node to the neighborhood
-			for (DefaultWeightedEdge e : extension) {
-				String s = underlying.getEdgeSource(e);
-				String r = underlying.getEdgeTarget(e);
-				if (!(nodes.contains(s) && nodes.contains(r))) {	// Skip "back edges"
-					NavigableSet<Double> times = interactionsByEdge.get(e).subSet(t + 0.0d, true, t + 1.0d, false);
-					if (times.size() > 0) {
-						if (nodes.contains(s)) { newnodes.add(r); }
-						else { newnodes.add(s); }
-					}
-				}
-			}
-			
-			width--;
-		}
-		
-		nodes.addAll(newnodes);
-		return nodes;
 	}
 	
 	TreeSet<TemporalID> calcNowNeighborhood(String vertex, int t, int width) {
